@@ -7,7 +7,8 @@ use std::{
     collections::HashMap,
     fmt::{self, write},
     io::{Read, Write},
-    net::{IpAddr, Ipv4Addr, TcpListener, TcpStream},
+    net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream},
+    vec,
 };
 
 use dns::resolve::Query;
@@ -16,6 +17,7 @@ use dns::resolve::Query;
 pub enum Error {
     ParseUrlError,
     StreamconnectionError(String),
+    ResponseParseError,
 }
 
 impl fmt::Display for Error {
@@ -26,6 +28,9 @@ impl fmt::Display for Error {
             }
             Error::StreamconnectionError(string) => {
                 write!(f, "Error establishing connection: {string}")
+            }
+            Error::ResponseParseError => {
+                write!(f, "Response parsing error",)
             }
         }
     }
@@ -103,10 +108,11 @@ struct HttpRequest {
     body: Option<Vec<u8>>,
 }
 
-struct HttpResponse<T> {
-    status_code: u32,
+struct HttpResponse {
+    //status_code: u32,
+    status_line: String,
     headers: HashMap<String, String>,
-    body: Option<T>,
+    body: String,
 }
 
 #[derive(Debug)]
@@ -203,33 +209,86 @@ impl ClientConnection {
     }
 
     pub fn get_response(&mut self, response: &str) -> Option<(String, String)> {
+        let mut headers_hash: HashMap<&str, &str> = HashMap::new();
         let mut parts = response.split("\r\n\r\n");
         if let (Some(headers), Some(body)) = (parts.next(), parts.next()) {
-            Some((headers.to_string(), body.to_string()))
+            // let header_string = headers.to_string();
+            // let mut head_split = header_string.split_once("\r\n");
+            // println!("Headers: {:?}", head_split);
+            // if let Some(header_line) = head_split {
+            //     let status_line = header_line.0.to_string();
+            //     println!("Status line: {}", status_line);
+            //     let rest_headers = header_line.1;
+            //     for line in rest_headers.lines() {
+            //         let mut parts = line.splitn(2, ": ");
+            //         if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+            //             headers_hash.insert(key, value);
+            //        }
+            //     }
+            // }
+            // println!("Header key and values:\n{:?}", headers_hash);
+            (Some((headers.to_string(), body.to_string())))
         } else {
             None
         }
     }
 
-    pub fn send_request(&mut self) -> Result<(), Error> {
+    pub fn send_request(&mut self) -> Result<HttpResponse, Error> {
         // consist of headers
 
         let _ = self.set_headers().unwrap();
-        //let mut headers = HashMap::new();
+        let mut headers_hash = HashMap::new();
         //let mut body = Vec::new();
         let mut buffer = String::new();
         let bytes_read = self.stream.read_to_string(&mut buffer).unwrap();
         let res = &buffer[..bytes_read];
+        let mut stat_line = String::new();
         if let Some((headers, body)) = self.get_response(res) {
-            println!("Headers:\n{}\n\nBody:\n{}", headers, body);
+            //println!("Headers:\n{}\n\nBody:\n{}", headers, body);
+            let mut status_line = None;
+            for line in headers.as_str().lines() {
+                if status_line.is_none() {
+                    status_line = Some(line.to_string());
+                    if let Some(s_line) = &status_line {
+                        stat_line.push_str(&s_line);
+                    }
+                    continue;
+                }
+                if line.is_empty() {
+                    break;
+                }
+                let mut parts = line.splitn(2, ": ");
+                if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
+                    headers_hash.insert(key.to_string(), value.to_string());
+                }
+            }
+            return Ok(HttpResponse {
+                status_line: stat_line,
+                headers: headers_hash,
+                body: body,
+            });
         }
-        println!("String Data: {:?}", res);
-        Ok(())
+        Err(Error::ResponseParseError)
+
+        //println!("String Data: {:?}", res);
     }
 }
 
+// impl HttpResponse {
+//     pub fn new(stream: &mut TcpStream) {
+//         let mut headers: HashMap<String, String> = HashMap::new();
+//         let mut body: Option<vec<u8>> = None;
+//         let mut buf: Vec<u8> = vec![];
+
+//         match stream.read(buf) {
+
+//         }
+//     }
+// }
+
 fn main() {
-    let req = HttpRequest::new().set_method(Method::GET);
+    let mut listener = TcpListener::bind("127.0.0.1:7800").unwrap();
+
     let url = "https://example.com";
     if let Ok(p_url) = URL::from(url) {
         //let query = dns::resolve::Query::new();
@@ -237,8 +296,33 @@ fn main() {
         //let constructed_url = format!("{}", ip_addr);
         //println!("Ip Address: {:?}", constructed_url);
         if let Ok(mut conn) = ClientConnection::new(&p_url.host) {
-            //conn.send_request();
-            println!("Coonected on host: {:?}", conn)
+            let response = conn.send_request().unwrap();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        handle_client(s, &response);
+                    }
+                    Err(e) => {
+                        println!("Error connection: {}", e);
+                    }
+                }
+            }
         }
     }
+}
+
+fn handle_client(mut stream: TcpStream, response: &HttpResponse) {
+    let mut buffer = [0; 1024];
+    while match stream.read(&mut buffer) {
+        Ok(s) => {
+            let status_line = &response.status_line;
+            stream.write(status_line.as_bytes()).unwrap();
+            return;
+        }
+        Err(e) => {
+            println!("Error: {}", e);
+            stream.shutdown(Shutdown::Both).unwrap();
+            false
+        }
+    } {}
 }
