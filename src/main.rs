@@ -8,10 +8,12 @@ use std::{
     fmt::{self, write},
     io::{Read, Write},
     net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream},
-    vec,
+    time::{Duration, SystemTime},
 };
 
 use dns::resolve::Query;
+
+use lazy_static::lazy_static;
 
 #[derive(Debug)]
 pub enum Error {
@@ -166,7 +168,6 @@ impl ClientConnection {
     pub fn new(url: &str) -> Result<ClientConnection, Error> {
         let parsed_url = URL::from(url)?;
         let stream = TcpStream::connect(format!("{}:80", parsed_url.host));
-        println!("Coonection : {:?}", stream);
         match stream {
             Ok(s) => Ok(ClientConnection {
                 url: parsed_url,
@@ -316,7 +317,12 @@ fn handle_client(mut stream: TcpStream, response: &HttpResponse) {
     while match stream.read(&mut buffer) {
         Ok(s) => {
             let status_line = &response.status_line;
-            stream.write(status_line.as_bytes()).unwrap();
+            let content_len = response.body.len();
+            //println!("BODY LENGTH: {}", content_len);
+            let body = &response.body;
+            let f_response =
+                format!("{status_line}\r\nContent-Length: {content_len}\r\n\r\n{body}");
+            stream.write(f_response.as_bytes()).unwrap();
             return;
         }
         Err(e) => {
@@ -325,4 +331,29 @@ fn handle_client(mut stream: TcpStream, response: &HttpResponse) {
             false
         }
     } {}
+}
+struct Cache {
+    response: String,
+    expires: SystemTime,
+}
+lazy_static! {
+    static ref CACHE: std::sync::Mutex<HashMap<String, Cache>> =
+        std::sync::Mutex::new(HashMap::new());
+}
+fn get_cache(url: &str) -> String {
+    let mut cache = CACHE.lock().unwrap();
+    if let Some(item) = cache.get(url) {
+        if item.expires > SystemTime::now() {
+            return item.response.clone();
+        }
+    }
+    let response = String::from("...");
+    cache.insert(
+        url.to_string(),
+        Cache {
+            response: response.clone(),
+            expires: SystemTime::now() + Duration::from_secs(300),
+        },
+    );
+    response
 }
